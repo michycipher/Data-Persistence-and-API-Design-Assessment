@@ -1,5 +1,7 @@
 'use strict';
 
+const { getCountryName } = require('./countries');
+
 async function fetchJSON(url, apiName) {
   let res;
   try {
@@ -77,6 +79,7 @@ async function enrichName(name) {
     age: agifyData.age,
     age_group: classifyAgeGroup(agifyData.age),
     country_id: topCountry.country_id,
+    country_name: getCountryName(topCountry.country_id),
     country_probability: topCountry.probability,
   };
 }

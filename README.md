@@ -1,6 +1,7 @@
 # Profile Intelligence Service — Stage 2
+This was a continuation of the original profile service built from the HNG14 Stage 1 project. The Stage 2 version is a complete rewrite with a focus on advanced querying capabilities and a more robust architecture.
 
-A RESTful API that stores enriched demographic profiles and supports advanced filtering, sorting, pagination, and natural language querying.
+Built from scratch in Node.js with Express and PostgreSQL, this service ingests a list of names, enriches them with demographic data from external APIs, and provides a powerful RESTful API for querying the enriched profiles. The API supports complex filtering, sorting, pagination, and even natural language queries like "young males from Nigeria above 30".
 
 ---
 
@@ -28,7 +29,7 @@ profile-service/
 │       ├── countries.js          # ISO code ↔ country name mapping
 │       └── nlpParser.js          # Rule-based NLP parser
 ├── data/
-│   └── profiles.json             # ← Place seed file here (gitignored)
+│   └── profiles.json             # Place seed file here (gitignored)
 ├── .env.example
 ├── Dockerfile
 ├── package.json
@@ -44,7 +45,7 @@ git clone <your-repo-url>
 cd profile-service
 npm install
 cp .env.example .env
-# Edit .env → set DATABASE_URL
+# Edit .env -> set DATABASE_URL
 npm run dev
 ```
 
@@ -54,7 +55,7 @@ Place the provided `profiles.json` at `data/profiles.json`, then:
 
 ```bash
 npm run seed
-# ✅ Done. Inserted: 2026 | Skipped (duplicates): 0
+# Done. Inserted: 2026 | Skipped (duplicates): 0
 ```
 
 Safe to re-run — duplicates are skipped automatically using `ON CONFLICT (name) DO NOTHING`.
@@ -66,7 +67,7 @@ Safe to re-run — duplicates are skipped automatically using `ON CONFLICT (name
 ### `POST /api/profiles` — Create profile
 
 ```bash
-curl -X POST /api/profiles -d '{"name": "fatima"}'
+curl -X POST /api/profiles -d '{"name": "rizzolii"}'
 ```
 
 ### `GET /api/profiles` — List with filtering, sorting, pagination
@@ -113,11 +114,11 @@ The `/api/profiles/search` endpoint accepts plain English via the `q` param and 
 
 1. Lowercase and trim the raw query string
 2. Detect gender using regex word boundaries (`\b`)
-3. If both male AND female keywords appear → remove gender filter (no restriction)
-4. Detect age group or "young" keyword → map to `age_group` or `min_age/max_age`
+3. If both male AND female keywords appear -> remove gender filter (no restriction)
+4. Detect age group or "young" keyword -> map to `age_group` or `min_age/max_age`
 5. Detect numeric age qualifiers (above/below/between) via regex
-6. Detect country using "from X" or "in X" pattern → resolve to ISO code
-7. If zero filters extracted → return `Unable to interpret query`
+6. Detect country using "from X" or "in X" pattern -> resolve to ISO code
+7. If zero filters extracted -> return `Unable to interpret query`
 8. Execute parameterized SQL with extracted filters + pagination
 
 ---
@@ -155,7 +156,7 @@ The `/api/profiles/search` endpoint accepts plain English via the `q` param and 
 
 Patterns `from [country]` and `in [country]` are matched. The captured country name is resolved against a built-in map of 150+ countries. Multi-word names (e.g. "south africa") are handled by progressive substring matching from longest to shortest.
 
-Common aliases supported: `usa → US`, `england → GB`, `uae → AE`, `drc → CD`, `ivory coast → CI`, etc.
+Common aliases supported: `usa -> US`, `england -> GB`, `uae -> AE`, `drc -> CD`, `ivory coast -> CI`, etc.
 
 ---
 
@@ -205,11 +206,11 @@ Common aliases supported: `usa → US`, `england → GB`, `uae → AE`, `drc →
 ## Deployment (Railway)
 
 1. Push to GitHub (public repo)
-2. Railway → New Project → Deploy from GitHub
-3. Add PostgreSQL service → auto-injects `DATABASE_URL`
+2. Railway -> New Project -> Deploy from GitHub
+3. Add PostgreSQL service -> auto-injects `DATABASE_URL`
 4. Set `NODE_ENV=production` in Variables tab
-5. Generate domain → Settings → Networking → Public Networking
-6. Seed production DB: set Railway external DB URL in local `.env` → run `npm run seed`
+5. Generate domain -> Settings -> Networking -> Public Networking
+6. Seed production DB: set Railway external DB URL in local `.env` -> run `npm run seed`
 
 ---
 

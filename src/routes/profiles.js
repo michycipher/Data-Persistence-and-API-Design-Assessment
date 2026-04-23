@@ -2,27 +2,27 @@
 
 const express = require('express');
 const { uuidv7 } = require('uuidv7');
-const { pool }   = require('../db');
+const { pool } = require('../db');
 const { enrichName } = require('../services/enrichment');
 const { parseQuery } = require('../services/nlpParser');
 
 const router = express.Router();
 
 const VALID_SORT_FIELDS = ['age', 'created_at', 'gender_probability'];
-const VALID_ORDERS      = ['asc', 'desc'];
-const INTEGER_RE        = /^\d+$/;   // used to validate page & limit
+const VALID_ORDERS = ['asc', 'desc'];
+const INTEGER_RE = /^\d+$/;   // used to validate page & limit
 
-// ─── Pagination parser ───────────────────────────────────────────────────────
+// Pagination parser
 /**
  * Safely parse page & limit from raw query-string values.
  * Uses regex to confirm the value is a pure integer string before
  * converting, so we never silently produce NaN in the response envelope.
  */
 function parsePagination(rawPage, rawLimit) {
-  const pageStr  = String(rawPage  ?? '1').trim();
+  const pageStr = String(rawPage ?? '1').trim();
   const limitStr = String(rawLimit ?? '10').trim();
 
-  const page  = INTEGER_RE.test(pageStr)  ? Math.max(1, Number(pageStr))               : 1;
+  const page = INTEGER_RE.test(pageStr) ? Math.max(1, Number(pageStr)) : 1;
   const limit = INTEGER_RE.test(limitStr) ? Math.min(50, Math.max(1, Number(limitStr))) : 10;
 
   return { page, limit, offset: (page - 1) * limit };
@@ -31,16 +31,16 @@ function parsePagination(rawPage, rawLimit) {
 // Formatters 
 function formatProfile(row) {
   return {
-    id:                  row.id,
-    name:                row.name,
-    gender:              row.gender,
-    gender_probability:  parseFloat(row.gender_probability),
-    age:                 parseInt(row.age, 10),
-    age_group:           row.age_group,
-    country_id:          row.country_id,
-    country_name:        row.country_name || null,
+    id: row.id,
+    name: row.name,
+    gender: row.gender,
+    gender_probability: parseFloat(row.gender_probability),
+    age: parseInt(row.age, 10),
+    age_group: row.age_group,
+    country_id: row.country_id,
+    country_name: row.country_name || null,
     country_probability: parseFloat(row.country_probability),
-    created_at:          new Date(row.created_at).toISOString(),
+    created_at: new Date(row.created_at).toISOString(),
   };
 }
 
@@ -53,20 +53,20 @@ function formatProfileFull(row) {
 // WHERE clause builder 
 function buildWhereClause(filters) {
   const conditions = ['1=1'];
-  const params     = [];
+  const params = [];
 
   const add = (sql, value) => {
     params.push(value);
     conditions.push(sql.replace('?', `$${params.length}`));
   };
 
-  if (filters.gender)      add('LOWER(gender) = ?',    filters.gender.toLowerCase());
-  if (filters.age_group)   add('LOWER(age_group) = ?', filters.age_group.toLowerCase());
-  if (filters.country_id)  add('UPPER(country_id) = ?', filters.country_id.toUpperCase());
+  if (filters.gender) add('LOWER(gender) = ?', filters.gender.toLowerCase());
+  if (filters.age_group) add('LOWER(age_group) = ?', filters.age_group.toLowerCase());
+  if (filters.country_id) add('UPPER(country_id) = ?', filters.country_id.toUpperCase());
 
-  if (filters.min_age != null)                 add('age >= ?',                parseInt(filters.min_age,  10));
-  if (filters.max_age != null)                 add('age <= ?',                parseInt(filters.max_age,  10));
-  if (filters.min_gender_probability  != null) add('gender_probability >= ?',  parseFloat(filters.min_gender_probability));
+  if (filters.min_age != null) add('age >= ?', parseInt(filters.min_age, 10));
+  if (filters.max_age != null) add('age <= ?', parseInt(filters.max_age, 10));
+  if (filters.min_gender_probability != null) add('gender_probability >= ?', parseFloat(filters.min_gender_probability));
   if (filters.min_country_probability != null) add('country_probability >= ?', parseFloat(filters.min_country_probability));
 
   return { where: conditions.join(' AND '), params };
@@ -87,7 +87,7 @@ function validateListParams(q) {
   }
 
   if (q.sort_by && !VALID_SORT_FIELDS.includes(q.sort_by)) return 'Invalid query parameters';
-  if (q.order   && !VALID_ORDERS.includes(q.order.toLowerCase())) return 'Invalid query parameters';
+  if (q.order && !VALID_ORDERS.includes(q.order.toLowerCase())) return 'Invalid query parameters';
 
   return null;
 }
@@ -112,14 +112,14 @@ router.post('/', async (req, res) => {
     );
     if (existing.rows.length > 0) {
       return res.status(200).json({
-        status:  'success',
+        status: 'success',
         message: 'Profile already exists',
-        data:    formatProfileFull(existing.rows[0]),
+        data: formatProfileFull(existing.rows[0]),
       });
     }
 
-    const enriched   = await enrichName(normalizedName);
-    const id         = uuidv7();
+    const enriched = await enrichName(normalizedName);
+    const id = uuidv7();
     const created_at = new Date().toISOString();
 
     const result = await pool.query(
@@ -139,7 +139,7 @@ router.post('/', async (req, res) => {
 
     return res.status(201).json({
       status: 'success',
-      data:   formatProfileFull(result.rows[0]),
+      data: formatProfileFull(result.rows[0]),
     });
   } catch (err) {
     if (err.statusCode === 502)
@@ -162,7 +162,7 @@ router.get('/search', async (req, res) => {
     return res.status(400).json({ status: 'error', message: 'Unable to interpret query' });
 
   const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
-  const { where, params }       = buildWhereClause(filters);
+  const { where, params } = buildWhereClause(filters);
 
   try {
     const countResult = await pool.query(
@@ -204,7 +204,7 @@ router.get('/', async (req, res) => {
     min_age, max_age,
     min_gender_probability, min_country_probability,
     sort_by = 'created_at',
-    order   = 'desc',
+    order = 'desc',
   } = req.query;
 
   const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
@@ -259,7 +259,7 @@ router.get('/:id', async (req, res) => {
 
     return res.status(200).json({
       status: 'success',
-      data:   formatProfileFull(result.rows[0]),
+      data: formatProfileFull(result.rows[0]),
     });
   } catch (err) {
     console.error('[GET /api/profiles/:id]', err);

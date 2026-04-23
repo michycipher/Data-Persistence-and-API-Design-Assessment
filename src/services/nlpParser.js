@@ -2,15 +2,7 @@
 
 const { getCountryCode } = require('./countries');
 
-/**
- * Natural Language Query Parser
- * Rule-based only — no AI, no LLMs.
- *
- * Uses regex word boundaries (\b) throughout for reliable matching
- * regardless of surrounding characters or casing.
- */
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers 
 
 function toInt(str) {
   const n = parseInt(str, 10);
@@ -22,7 +14,7 @@ function has(pattern, str) {
   return pattern.test(str);
 }
 
-// ─── Gender detection ────────────────────────────────────────────────────────
+// Gender detection 
 
 const MALE_RE   = /\b(male|males|man|men)\b/;
 const FEMALE_RE = /\b(female|females|woman|women|girl|girls)\b/;
@@ -30,13 +22,13 @@ const FEMALE_RE = /\b(female|females|woman|women|girl|girls)\b/;
 function extractGender(q) {
   const isMale   = MALE_RE.test(q);
   const isFemale = FEMALE_RE.test(q);
-  if (isMale && isFemale) return null;   // both → no gender filter
+  if (isMale && isFemale) return null;   // both -> no gender filter
   if (isMale)   return 'male';
   if (isFemale) return 'female';
   return null;
 }
 
-// ─── Age group / young detection ────────────────────────────────────────────
+// Age group / young detection
 
 function extractAgeGroup(q) {
   // "young" is a special case — maps to a min/max range, not a stored group
@@ -48,7 +40,7 @@ function extractAgeGroup(q) {
   return null;
 }
 
-// ─── Age qualifiers ──────────────────────────────────────────────────────────
+// Age qualifiers
 
 function extractAgeRange(q) {
   const result = {};
@@ -79,7 +71,7 @@ function extractAgeRange(q) {
   return result;
 }
 
-// ─── Country extraction ──────────────────────────────────────────────────────
+// Country extraction
 
 // Stop words that signal the country name has ended
 const STOP_WORDS = ['above', 'below', 'over', 'under', 'older', 'younger',
@@ -109,7 +101,7 @@ function extractCountry(q) {
   return null;
 }
 
-// ─── Main parser ─────────────────────────────────────────────────────────────
+// Main parser
 
 /**
  * Parse a plain English query into structured filter params.

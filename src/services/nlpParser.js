@@ -4,51 +4,117 @@ const { getCountryCode } = require('./countries');
 
 /**
  * Natural Language Query Parser
- *
- * Converts plain English queries into structured filter objects.
  * Rule-based only — no AI, no LLMs.
  *
- * Supported patterns:
- *   Gender   : male, males, man, men | female, females, woman, women, girl, girls
- *   Age group: young (16–24), teenager/teen, adult, senior/elderly, child/children/kids
- *   Age range: above/over/older than N, below/under/younger than N, between N and M
- *   Country  : "from [country]", "in [country]"
+ * Uses regex word boundaries (\b) throughout for reliable matching
+ * regardless of surrounding characters or casing.
  */
 
-// Keyword maps
-
-const GENDER_MALE_WORDS    = ['male', 'males', 'man', 'men'];
-const GENDER_FEMALE_WORDS  = ['female', 'females', 'woman', 'women', 'girl', 'girls'];
-
-const AGE_GROUP_MAP = {
-  young:      { min_age: 16, max_age: 24 },     // "young" is a special case — not a stored group
-  teenager:   { age_group: 'teenager' },
-  teenagers:  { age_group: 'teenager' },
-  teen:       { age_group: 'teenager' },
-  teens:      { age_group: 'teenager' },
-  adult:      { age_group: 'adult' },
-  adults:     { age_group: 'adult' },
-  senior:     { age_group: 'senior' },
-  seniors:    { age_group: 'senior' },
-  elderly:    { age_group: 'senior' },
-  old:        { age_group: 'senior' },
-  child:      { age_group: 'child' },
-  children:   { age_group: 'child' },
-  kids:       { age_group: 'child' },
-  kid:        { age_group: 'child' },
-};
-
-// Helpers 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function toInt(str) {
   const n = parseInt(str, 10);
   return isNaN(n) ? null : n;
 }
 
+// Test a word-boundary regex against a lowercased string
+function has(pattern, str) {
+  return pattern.test(str);
+}
+
+// ─── Gender detection ────────────────────────────────────────────────────────
+
+const MALE_RE   = /\b(male|males|man|men)\b/;
+const FEMALE_RE = /\b(female|females|woman|women|girl|girls)\b/;
+
+function extractGender(q) {
+  const isMale   = MALE_RE.test(q);
+  const isFemale = FEMALE_RE.test(q);
+  if (isMale && isFemale) return null;   // both → no gender filter
+  if (isMale)   return 'male';
+  if (isFemale) return 'female';
+  return null;
+}
+
+// ─── Age group / young detection ────────────────────────────────────────────
+
+function extractAgeGroup(q) {
+  // "young" is a special case — maps to a min/max range, not a stored group
+  if (/\byoung\b/.test(q))                              return { min_age: 16, max_age: 24 };
+  if (/\b(teenager|teenagers|teen|teens)\b/.test(q))    return { age_group: 'teenager' };
+  if (/\b(adult|adults)\b/.test(q))                     return { age_group: 'adult' };
+  if (/\b(senior|seniors|elderly)\b/.test(q))           return { age_group: 'senior' };
+  if (/\b(child|children|kids|kid)\b/.test(q))          return { age_group: 'child' };
+  return null;
+}
+
+// ─── Age qualifiers ──────────────────────────────────────────────────────────
+
+function extractAgeRange(q) {
+  const result = {};
+
+  // "between N and M"  (check first — more specific)
+  const between = q.match(/\bbetween\s+(\d+)\s+and\s+(\d+)\b/);
+  if (between) {
+    result.min_age = toInt(between[1]);
+    result.max_age = toInt(between[2]);
+    return result;
+  }
+
+  // "above N" / "over N" / "older than N"
+  const above = q.match(/\b(?:above|over|older\s+than)\s+(\d+)\b/);
+  if (above) result.min_age = toInt(above[1]);
+
+  // "below N" / "under N" / "younger than N"
+  const below = q.match(/\b(?:below|under|younger\s+than)\s+(\d+)\b/);
+  if (below) result.max_age = toInt(below[1]);
+
+  // "aged N" / "age N"
+  const aged = q.match(/\baged?\s+(\d+)\b/);
+  if (aged) {
+    result.min_age = toInt(aged[1]);
+    result.max_age = toInt(aged[1]);
+  }
+
+  return result;
+}
+
+// ─── Country extraction ──────────────────────────────────────────────────────
+
+// Stop words that signal the country name has ended
+const STOP_WORDS = ['above', 'below', 'over', 'under', 'older', 'younger',
+                    'aged', 'age', 'between', 'who', 'with', 'and', 'or'];
+const STOP_RE = new RegExp(`\\b(${STOP_WORDS.join('|')})\\b`);
+
+function extractCountry(q) {
+  // Match "from X" or "in X" — greedy capture of everything after the keyword
+  const match = q.match(/\b(?:from|in)\s+([a-z][a-z\s]*)/);
+  if (!match) return null;
+
+  let raw = match[1].trim();
+
+  // Trim any trailing stop words and what follows them
+  const stopIdx = raw.search(STOP_RE);
+  if (stopIdx > 0) raw = raw.slice(0, stopIdx).trim();
+
+  // Try the whole remaining string first, then progressively shorter
+  // (handles multi-word country names like "south africa")
+  const words = raw.split(/\s+/);
+  for (let len = words.length; len >= 1; len--) {
+    const candidate = words.slice(0, len).join(' ').trim();
+    const code = getCountryCode(candidate);
+    if (code) return code;
+  }
+
+  return null;
+}
+
+// ─── Main parser ─────────────────────────────────────────────────────────────
+
 /**
- * Parse a plain English query string into filter/sort parameters.
+ * Parse a plain English query into structured filter params.
  *
- * @param {string} query   Raw query string (e.g. "young males from nigeria")
+ * @param {string} query
  * @returns {{ filters: object, interpreted: boolean }}
  */
 function parseQuery(query) {
@@ -57,70 +123,25 @@ function parseQuery(query) {
   }
 
   const q       = query.toLowerCase().trim();
-  const words   = q.split(/\s+/);
   const filters = {};
 
-  // Gender 
-  if (words.some(w => GENDER_MALE_WORDS.includes(w))) {
-    filters.gender = 'male';
-  }
-  if (words.some(w => GENDER_FEMALE_WORDS.includes(w))) {
-    // "male and female" → no gender filter (both genders)
-    if (filters.gender === 'male') {
-      delete filters.gender; // both genders mentioned -> no restriction
-    } else {
-      filters.gender = 'female';
-    }
-  }
+  // Gender
+  const gender = extractGender(q);
+  if (gender) filters.gender = gender;
 
-  // Age group / young 
-  for (const word of words) {
-    if (AGE_GROUP_MAP[word]) {
-      const mapping = AGE_GROUP_MAP[word];
-      Object.assign(filters, mapping);
-      break; // first match wins
-    }
-  }
+  // Age group / "young"
+  const ageGroup = extractAgeGroup(q);
+  if (ageGroup) Object.assign(filters, ageGroup);
 
-  // Age qualifiers 
-  // "above N" / "over N" / "older than N"
-  const aboveMatch = q.match(/(?:above|over|older than)\s+(\d+)/);
-  if (aboveMatch) {
-    filters.min_age = toInt(aboveMatch[1]);
-  }
+  // Numeric age qualifiers
+  const ageRange = extractAgeRange(q);
+  Object.assign(filters, ageRange);
 
-  // "below N" / "under N" / "younger than N"
-  const belowMatch = q.match(/(?:below|under|younger than)\s+(\d+)/);
-  if (belowMatch) {
-    filters.max_age = toInt(belowMatch[1]);
-  }
+  // Country
+  const countryId = extractCountry(q);
+  if (countryId) filters.country_id = countryId;
 
-  // "between N and M"
-  const betweenMatch = q.match(/between\s+(\d+)\s+and\s+(\d+)/);
-  if (betweenMatch) {
-    filters.min_age = toInt(betweenMatch[1]);
-    filters.max_age = toInt(betweenMatch[2]);
-  }
-
-  // "aged N" / "age N"
-  const agedMatch = q.match(/\baged?\s+(\d+)\b/);
-  if (agedMatch) {
-    filters.min_age = toInt(agedMatch[1]);
-    filters.max_age = toInt(agedMatch[1]);
-  }
-
-  //  Country
-  // "from [country]" or "in [country]"
-  const countryMatch = q.match(/(?:from|in)\s+([a-z\s]+?)(?:\s+(?:above|below|over|under|older|younger|aged|between|who|with|and)|$)/);
-  if (countryMatch) {
-    const countryName = countryMatch[1].trim();
-    const code        = getCountryCode(countryName);
-    if (code) filters.country_id = code;
-  }
-
-  // Determine if anything was interpreted 
   const interpreted = Object.keys(filters).length > 0;
-
   return { filters, interpreted };
 }
 

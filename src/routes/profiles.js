@@ -8,12 +8,27 @@ const { parseQuery } = require('../services/nlpParser');
 
 const router = express.Router();
 
-// ─── Whitelists (prevent SQL injection on dynamic clauses) ───────────────────
 const VALID_SORT_FIELDS = ['age', 'created_at', 'gender_probability'];
 const VALID_ORDERS      = ['asc', 'desc'];
+const INTEGER_RE        = /^\d+$/;   // used to validate page & limit
 
-// ─── Formatters ──────────────────────────────────────────────────────────────
+// ─── Pagination parser ───────────────────────────────────────────────────────
+/**
+ * Safely parse page & limit from raw query-string values.
+ * Uses regex to confirm the value is a pure integer string before
+ * converting, so we never silently produce NaN in the response envelope.
+ */
+function parsePagination(rawPage, rawLimit) {
+  const pageStr  = String(rawPage  ?? '1').trim();
+  const limitStr = String(rawLimit ?? '10').trim();
 
+  const page  = INTEGER_RE.test(pageStr)  ? Math.max(1, Number(pageStr))               : 1;
+  const limit = INTEGER_RE.test(limitStr) ? Math.min(50, Math.max(1, Number(limitStr))) : 10;
+
+  return { page, limit, offset: (page - 1) * limit };
+}
+
+// Formatters 
 function formatProfile(row) {
   return {
     id:                  row.id,
@@ -31,43 +46,53 @@ function formatProfile(row) {
 
 function formatProfileFull(row) {
   const p = formatProfile(row);
-  if (row.sample_size) p.sample_size = parseInt(row.sample_size, 10);
+  if (row.sample_size != null) p.sample_size = parseInt(row.sample_size, 10);
   return p;
 }
 
-// ─── Shared WHERE clause builder ─────────────────────────────────────────────
+// WHERE clause builder 
 function buildWhereClause(filters) {
   const conditions = ['1=1'];
   const params     = [];
 
-  const add = (condition, value) => {
+  const add = (sql, value) => {
     params.push(value);
-    conditions.push(condition.replace('?', `$${params.length}`));
+    conditions.push(sql.replace('?', `$${params.length}`));
   };
 
-  if (filters.gender)    add('LOWER(gender) = ?',    filters.gender.toLowerCase());
-  if (filters.age_group) add('LOWER(age_group) = ?', filters.age_group.toLowerCase());
-  if (filters.country_id) add('UPPER(country_id) = ?', filters.country_id.toUpperCase());
-  if (filters.min_age    != null) add('age >= ?', parseInt(filters.min_age, 10));
-  if (filters.max_age    != null) add('age <= ?', parseInt(filters.max_age, 10));
+  if (filters.gender)      add('LOWER(gender) = ?',    filters.gender.toLowerCase());
+  if (filters.age_group)   add('LOWER(age_group) = ?', filters.age_group.toLowerCase());
+  if (filters.country_id)  add('UPPER(country_id) = ?', filters.country_id.toUpperCase());
+
+  if (filters.min_age != null)                 add('age >= ?',                parseInt(filters.min_age,  10));
+  if (filters.max_age != null)                 add('age <= ?',                parseInt(filters.max_age,  10));
   if (filters.min_gender_probability  != null) add('gender_probability >= ?',  parseFloat(filters.min_gender_probability));
   if (filters.min_country_probability != null) add('country_probability >= ?', parseFloat(filters.min_country_probability));
 
   return { where: conditions.join(' AND '), params };
 }
 
-// ─── Param validation ────────────────────────────────────────────────────────
+// Query-param validation 
 function validateListParams(q) {
-  const numFields = ['min_age','max_age','min_gender_probability','min_country_probability','page','limit'];
-  for (const f of numFields) {
-    if (q[f] !== undefined && isNaN(Number(q[f]))) return 'Invalid query parameters';
+  const numericFields = [
+    'min_age', 'max_age',
+    'min_gender_probability', 'min_country_probability',
+    'page', 'limit',
+  ];
+
+  for (const f of numericFields) {
+    if (q[f] !== undefined && isNaN(Number(q[f]))) {
+      return 'Invalid query parameters';
+    }
   }
+
   if (q.sort_by && !VALID_SORT_FIELDS.includes(q.sort_by)) return 'Invalid query parameters';
   if (q.order   && !VALID_ORDERS.includes(q.order.toLowerCase())) return 'Invalid query parameters';
+
   return null;
 }
 
-// ─── POST /api/profiles ───────────────────────────────────────────────────────
+// POST /api/profiles 
 router.post('/', async (req, res) => {
   const { name } = req.body;
 
@@ -82,12 +107,14 @@ router.post('/', async (req, res) => {
 
   try {
     const existing = await pool.query(
-      'SELECT * FROM profiles WHERE LOWER(name) = $1', [normalizedName]
+      'SELECT * FROM profiles WHERE LOWER(name) = $1',
+      [normalizedName]
     );
     if (existing.rows.length > 0) {
       return res.status(200).json({
-        status: 'success', message: 'Profile already exists',
-        data: formatProfileFull(existing.rows[0]),
+        status:  'success',
+        message: 'Profile already exists',
+        data:    formatProfileFull(existing.rows[0]),
       });
     }
 
@@ -99,15 +126,21 @@ router.post('/', async (req, res) => {
       `INSERT INTO profiles
          (id, name, gender, gender_probability, sample_size,
           age, age_group, country_id, country_name, country_probability, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [id, normalizedName,
-       enriched.gender, enriched.gender_probability, enriched.sample_size,
-       enriched.age, enriched.age_group,
-       enriched.country_id, enriched.country_name, enriched.country_probability,
-       created_at]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING *`,
+      [
+        id, normalizedName,
+        enriched.gender, enriched.gender_probability, enriched.sample_size,
+        enriched.age, enriched.age_group,
+        enriched.country_id, enriched.country_name, enriched.country_probability,
+        created_at,
+      ]
     );
 
-    return res.status(201).json({ status: 'success', data: formatProfileFull(result.rows[0]) });
+    return res.status(201).json({
+      status: 'success',
+      data:   formatProfileFull(result.rows[0]),
+    });
   } catch (err) {
     if (err.statusCode === 502)
       return res.status(502).json({ status: '502', message: `${err.api} returned an invalid response` });
@@ -116,11 +149,11 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ─── GET /api/profiles/search  ← MUST be before /:id ─────────────────────────
+// GET /api/profiles/search
 router.get('/search', async (req, res) => {
-  const { q, page, limit } = req.query;
+  const { q } = req.query;
 
-  if (!q || q.trim() === '')
+  if (!q || String(q).trim() === '')
     return res.status(400).json({ status: 'error', message: 'Query parameter q is required' });
 
   const { filters, interpreted } = parseQuery(q);
@@ -128,25 +161,30 @@ router.get('/search', async (req, res) => {
   if (!interpreted)
     return res.status(400).json({ status: 'error', message: 'Unable to interpret query' });
 
-  const pageNum  = Math.max(1, parseInt(page,  10) || 1);
-  const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 10));
-  const offset   = (pageNum - 1) * limitNum;
-  const { where, params } = buildWhereClause(filters);
+  const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
+  const { where, params }       = buildWhereClause(filters);
 
   try {
-    const countResult = await pool.query(`SELECT COUNT(*) FROM profiles WHERE ${where}`, params);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM profiles WHERE ${where}`,
+      params
+    );
     const total = parseInt(countResult.rows[0].count, 10);
 
-    const dataParams = [...params, limitNum, offset];
+    const dataParams = [...params, limit, offset];
     const dataResult = await pool.query(
-      `SELECT * FROM profiles WHERE ${where}
+      `SELECT * FROM profiles
+       WHERE ${where}
        ORDER BY created_at DESC
        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams
     );
 
     return res.status(200).json({
-      status: 'success', page: pageNum, limit: limitNum, total,
+      status: 'success',
+      page,
+      limit,
+      total,
       data: dataResult.rows.map(formatProfile),
     });
   } catch (err) {
@@ -155,7 +193,7 @@ router.get('/search', async (req, res) => {
   }
 });
 
-// ─── GET /api/profiles ────────────────────────────────────────────────────────
+// GET /api/profiles 
 router.get('/', async (req, res) => {
   const validationError = validateListParams(req.query);
   if (validationError)
@@ -163,35 +201,44 @@ router.get('/', async (req, res) => {
 
   const {
     gender, age_group, country_id,
-    min_age, max_age, min_gender_probability, min_country_probability,
-    sort_by = 'created_at', order = 'desc', page = 1, limit = 10,
+    min_age, max_age,
+    min_gender_probability, min_country_probability,
+    sort_by = 'created_at',
+    order   = 'desc',
   } = req.query;
 
-  const pageNum  = Math.max(1, parseInt(page,  10) || 1);
-  const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 10));
-  const offset   = (pageNum - 1) * limitNum;
+  const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
+
   const sortField = VALID_SORT_FIELDS.includes(sort_by) ? sort_by : 'created_at';
   const sortOrder = VALID_ORDERS.includes((order || '').toLowerCase()) ? order.toLowerCase() : 'desc';
 
   const { where, params } = buildWhereClause({
     gender, age_group, country_id,
-    min_age, max_age, min_gender_probability, min_country_probability,
+    min_age, max_age,
+    min_gender_probability, min_country_probability,
   });
 
   try {
-    const countResult = await pool.query(`SELECT COUNT(*) FROM profiles WHERE ${where}`, params);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM profiles WHERE ${where}`,
+      params
+    );
     const total = parseInt(countResult.rows[0].count, 10);
 
-    const dataParams = [...params, limitNum, offset];
+    const dataParams = [...params, limit, offset];
     const dataResult = await pool.query(
-      `SELECT * FROM profiles WHERE ${where}
+      `SELECT * FROM profiles
+       WHERE ${where}
        ORDER BY ${sortField} ${sortOrder}
        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams
     );
 
     return res.status(200).json({
-      status: 'success', page: pageNum, limit: limitNum, total,
+      status: 'success',
+      page,
+      limit,
+      total,
       data: dataResult.rows.map(formatProfile),
     });
   } catch (err) {
@@ -200,25 +247,36 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ─── GET /api/profiles/:id ────────────────────────────────────────────────────
+// GET /api/profiles/:id 
 router.get('/:id', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM profiles WHERE id = $1', [req.params.id]);
+    const result = await pool.query(
+      'SELECT * FROM profiles WHERE id = $1',
+      [req.params.id]
+    );
     if (result.rows.length === 0)
       return res.status(404).json({ status: 'error', message: 'Profile not found' });
-    return res.status(200).json({ status: 'success', data: formatProfileFull(result.rows[0]) });
+
+    return res.status(200).json({
+      status: 'success',
+      data:   formatProfileFull(result.rows[0]),
+    });
   } catch (err) {
     console.error('[GET /api/profiles/:id]', err);
     return res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
 
-// ─── DELETE /api/profiles/:id ─────────────────────────────────────────────────
+// DELETE /api/profiles/:id 
 router.delete('/:id', async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM profiles WHERE id = $1 RETURNING id', [req.params.id]);
+    const result = await pool.query(
+      'DELETE FROM profiles WHERE id = $1 RETURNING id',
+      [req.params.id]
+    );
     if (result.rows.length === 0)
       return res.status(404).json({ status: 'error', message: 'Profile not found' });
+
     return res.status(204).send();
   } catch (err) {
     console.error('[DELETE /api/profiles/:id]', err);

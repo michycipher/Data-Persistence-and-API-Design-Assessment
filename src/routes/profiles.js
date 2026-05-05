@@ -5,30 +5,58 @@ const { uuidv7 } = require('uuidv7');
 const { pool } = require('../db');
 const { enrichName } = require('../services/enrichment');
 const { parseQuery } = require('../services/nlpParser');
+const { authorize } = require('../auth/auth.middleware');
+const { generateCSV } = require('../utils/csv');
 
 const router = express.Router();
 
 const VALID_SORT_FIELDS = ['age', 'created_at', 'gender_probability'];
 const VALID_ORDERS = ['asc', 'desc'];
-const INTEGER_RE = /^\d+$/;   // used to validate page & limit
+const INTEGER_RE = /^\d+$/;
 
-// Pagination parser
-/**
- * Safely parse page & limit from raw query-string values.
- * Uses regex to confirm the value is a pure integer string before
- * converting, so we never silently produce NaN in the response envelope.
- */
+/* =========================
+   API VERSION MIDDLEWARE
+========================= */
+function requireApiVersion(req, res, next) {
+  const version = req.headers['x-api-version'];
+
+  if (!version) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'API version header required',
+    });
+  }
+
+  if (version !== '1') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Unsupported API version',
+    });
+  }
+
+  next();
+}
+
+router.use(requireApiVersion);
+
+/* =========================
+   PAGINATION
+========================= */
 function parsePagination(rawPage, rawLimit) {
   const pageStr = String(rawPage ?? '1').trim();
   const limitStr = String(rawLimit ?? '10').trim();
 
   const page = INTEGER_RE.test(pageStr) ? Math.max(1, Number(pageStr)) : 1;
-  const limit = INTEGER_RE.test(limitStr) ? Math.min(50, Math.max(1, Number(limitStr))) : 10;
+  const limit = INTEGER_RE.test(limitStr)
+    ? Math.min(50, Math.max(1, Number(limitStr)))
+    : 10;
 
   return { page, limit, offset: (page - 1) * limit };
 }
 
-// Formatters 
+/* =========================
+   FORMATTERS
+========================= */
 function formatProfile(row) {
   return {
     id: row.id,
@@ -50,7 +78,9 @@ function formatProfileFull(row) {
   return p;
 }
 
-// WHERE clause builder 
+/* =========================
+   WHERE CLAUSE BUILDER
+========================= */
 function buildWhereClause(filters) {
   const conditions = ['1=1'];
   const params = [];
@@ -66,18 +96,25 @@ function buildWhereClause(filters) {
 
   if (filters.min_age != null) add('age >= ?', parseInt(filters.min_age, 10));
   if (filters.max_age != null) add('age <= ?', parseInt(filters.max_age, 10));
-  if (filters.min_gender_probability != null) add('gender_probability >= ?', parseFloat(filters.min_gender_probability));
-  if (filters.min_country_probability != null) add('country_probability >= ?', parseFloat(filters.min_country_probability));
+  if (filters.min_gender_probability != null)
+    add('gender_probability >= ?', parseFloat(filters.min_gender_probability));
+  if (filters.min_country_probability != null)
+    add('country_probability >= ?', parseFloat(filters.min_country_probability));
 
   return { where: conditions.join(' AND '), params };
 }
 
-// Query-param validation 
+/* =========================
+   VALIDATION
+========================= */
 function validateListParams(q) {
   const numericFields = [
-    'min_age', 'max_age',
-    'min_gender_probability', 'min_country_probability',
-    'page', 'limit',
+    'min_age',
+    'max_age',
+    'min_gender_probability',
+    'min_country_probability',
+    'page',
+    'limit',
   ];
 
   for (const f of numericFields) {
@@ -92,16 +129,15 @@ function validateListParams(q) {
   return null;
 }
 
-// POST /api/profiles 
-router.post('/', async (req, res) => {
+/* =========================
+   CREATE PROFILE (ADMIN ONLY)
+========================= */
+router.post('/', authorize('admin'), async (req, res) => {
   const { name } = req.body;
 
-  if (name === undefined || name === null || name === '')
+  if (!name || typeof name !== 'string' || name.trim() === '') {
     return res.status(400).json({ status: 'error', message: 'Name is required' });
-  if (typeof name !== 'string')
-    return res.status(422).json({ status: 'error', message: 'Name must be a string' });
-  if (name.trim() === '')
-    return res.status(400).json({ status: 'error', message: 'Name cannot be empty' });
+  }
 
   const normalizedName = name.trim().toLowerCase();
 
@@ -110,6 +146,7 @@ router.post('/', async (req, res) => {
       'SELECT * FROM profiles WHERE LOWER(name) = $1',
       [normalizedName]
     );
+
     if (existing.rows.length > 0) {
       return res.status(200).json({
         status: 'success',
@@ -124,15 +161,21 @@ router.post('/', async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO profiles
-         (id, name, gender, gender_probability, sample_size,
-          age, age_group, country_id, country_name, country_probability, created_at)
+       (id, name, gender, gender_probability, sample_size,
+        age, age_group, country_id, country_name, country_probability, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *`,
       [
-        id, normalizedName,
-        enriched.gender, enriched.gender_probability, enriched.sample_size,
-        enriched.age, enriched.age_group,
-        enriched.country_id, enriched.country_name, enriched.country_probability,
+        id,
+        normalizedName,
+        enriched.gender,
+        enriched.gender_probability,
+        enriched.sample_size,
+        enriched.age,
+        enriched.age_group,
+        enriched.country_id,
+        enriched.country_name,
+        enriched.country_probability,
         created_at,
       ]
     );
@@ -142,87 +185,68 @@ router.post('/', async (req, res) => {
       data: formatProfileFull(result.rows[0]),
     });
   } catch (err) {
-    if (err.statusCode === 502)
-      return res.status(502).json({ status: '502', message: `${err.api} returned an invalid response` });
     console.error('[POST /api/profiles]', err);
     return res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
 
-// GET /api/profiles/search
-router.get('/search', async (req, res) => {
-  const { q } = req.query;
+/* =========================
+   EXPORT CSV
+========================= */
+router.get('/export', async (req, res) => {
+  if (req.query.format !== 'csv') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Only csv format supported',
+    });
+  }
 
-  if (!q || String(q).trim() === '')
-    return res.status(400).json({ status: 'error', message: 'Query parameter q is required' });
-
-  const { filters, interpreted } = parseQuery(q);
-
-  if (!interpreted)
-    return res.status(400).json({ status: 'error', message: 'Unable to interpret query' });
-
-  const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
-  const { where, params } = buildWhereClause(filters);
+  const { where, params } = buildWhereClause(req.query);
 
   try {
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM profiles WHERE ${where}`,
+    const result = await pool.query(
+      `SELECT * FROM profiles WHERE ${where} ORDER BY created_at DESC`,
       params
     );
-    const total = parseInt(countResult.rows[0].count, 10);
 
-    const dataParams = [...params, limit, offset];
-    const dataResult = await pool.query(
-      `SELECT * FROM profiles
-       WHERE ${where}
-       ORDER BY created_at DESC
-       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
-      dataParams
+    const csv = generateCSV(result.rows);
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="profiles_${Date.now()}.csv"`
     );
 
-    return res.status(200).json({
-      status: 'success',
-      page,
-      limit,
-      total,
-      data: dataResult.rows.map(formatProfile),
-    });
+    return res.status(200).send(csv);
   } catch (err) {
-    console.error('[GET /api/profiles/search]', err);
+    console.error('[EXPORT CSV]', err);
     return res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
 
-// GET /api/profiles 
+/* =========================
+   LIST
+========================= */
 router.get('/', async (req, res) => {
   const validationError = validateListParams(req.query);
-  if (validationError)
+  if (validationError) {
     return res.status(400).json({ status: 'error', message: validationError });
-
-  const {
-    gender, age_group, country_id,
-    min_age, max_age,
-    min_gender_probability, min_country_probability,
-    sort_by = 'created_at',
-    order = 'desc',
-  } = req.query;
+  }
 
   const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
 
-  const sortField = VALID_SORT_FIELDS.includes(sort_by) ? sort_by : 'created_at';
-  const sortOrder = VALID_ORDERS.includes((order || '').toLowerCase()) ? order.toLowerCase() : 'desc';
+  const sortField = VALID_SORT_FIELDS.includes(req.query.sort_by)
+    ? req.query.sort_by
+    : 'created_at';
 
-  const { where, params } = buildWhereClause({
-    gender, age_group, country_id,
-    min_age, max_age,
-    min_gender_probability, min_country_probability,
-  });
+  const sortOrder = VALID_ORDERS.includes((req.query.order || '').toLowerCase())
+    ? req.query.order.toLowerCase()
+    : 'desc';
+
+  const { where, params } = buildWhereClause(req.query);
 
   try {
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM profiles WHERE ${where}`,
-      params
-    );
+    const countResult = await pool.query(`SELECT COUNT(*) FROM profiles WHERE ${where}`, params);
     const total = parseInt(countResult.rows[0].count, 10);
 
     const dataParams = [...params, limit, offset];
@@ -234,54 +258,350 @@ router.get('/', async (req, res) => {
       dataParams
     );
 
+    const total_pages = Math.ceil(total / limit);
+
     return res.status(200).json({
       status: 'success',
       page,
       limit,
       total,
+      total_pages,
+      links: {
+        self: `/api/profiles?page=${page}&limit=${limit}`,
+        next: page < total_pages ? `/api/profiles?page=${page + 1}&limit=${limit}` : null,
+        prev: page > 1 ? `/api/profiles?page=${page - 1}&limit=${limit}` : null,
+      },
       data: dataResult.rows.map(formatProfile),
     });
   } catch (err) {
-    console.error('[GET /api/profiles]', err);
+    console.error('[LIST]', err);
     return res.status(500).json({ status: 'error', message: 'Internal server error' });
   }
 });
 
-// GET /api/profiles/:id 
+/* =========================
+   GET SINGLE
+========================= */
 router.get('/:id', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT * FROM profiles WHERE id = $1',
-      [req.params.id]
-    );
-    if (result.rows.length === 0)
-      return res.status(404).json({ status: 'error', message: 'Profile not found' });
+  const result = await pool.query('SELECT * FROM profiles WHERE id = $1', [req.params.id]);
 
-    return res.status(200).json({
-      status: 'success',
-      data: formatProfileFull(result.rows[0]),
-    });
-  } catch (err) {
-    console.error('[GET /api/profiles/:id]', err);
-    return res.status(500).json({ status: 'error', message: 'Internal server error' });
+  if (result.rows.length === 0) {
+    return res.status(404).json({ status: 'error', message: 'Profile not found' });
   }
+
+  return res.json({
+    status: 'success',
+    data: formatProfileFull(result.rows[0]),
+  });
 });
 
-// DELETE /api/profiles/:id 
-router.delete('/:id', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'DELETE FROM profiles WHERE id = $1 RETURNING id',
-      [req.params.id]
-    );
-    if (result.rows.length === 0)
-      return res.status(404).json({ status: 'error', message: 'Profile not found' });
+/* =========================
+   DELETE (ADMIN ONLY)
+========================= */
+router.delete('/:id', authorize('admin'), async (req, res) => {
+  const result = await pool.query(
+    'DELETE FROM profiles WHERE id = $1 RETURNING id',
+    [req.params.id]
+  );
 
-    return res.status(204).send();
-  } catch (err) {
-    console.error('[DELETE /api/profiles/:id]', err);
-    return res.status(500).json({ status: 'error', message: 'Internal server error' });
+  if (result.rows.length === 0) {
+    return res.status(404).json({ status: 'error', message: 'Profile not found' });
   }
+
+  return res.status(200).json({
+    status: 'success',
+    message: 'Profile deleted successfully',
+  });
 });
 
 module.exports = router;
+
+
+
+// 'use strict';
+
+// const express = require('express');
+// const { uuidv7 } = require('uuidv7');
+// const { pool } = require('../db');
+// const { enrichName } = require('../services/enrichment');
+// const { parseQuery } = require('../services/nlpParser');
+
+// const router = express.Router();
+
+// const VALID_SORT_FIELDS = ['age', 'created_at', 'gender_probability'];
+// const VALID_ORDERS = ['asc', 'desc'];
+// const INTEGER_RE = /^\d+$/;   // used to validate page & limit
+
+// // Pagination parser
+// /**
+//  * Safely parse page & limit from raw query-string values.
+//  * Uses regex to confirm the value is a pure integer string before
+//  * converting, so we never silently produce NaN in the response envelope.
+//  */
+// function parsePagination(rawPage, rawLimit) {
+//   const pageStr = String(rawPage ?? '1').trim();
+//   const limitStr = String(rawLimit ?? '10').trim();
+
+//   const page = INTEGER_RE.test(pageStr) ? Math.max(1, Number(pageStr)) : 1;
+//   const limit = INTEGER_RE.test(limitStr) ? Math.min(50, Math.max(1, Number(limitStr))) : 10;
+
+//   return { page, limit, offset: (page - 1) * limit };
+// }
+
+// // Formatters 
+// function formatProfile(row) {
+//   return {
+//     id: row.id,
+//     name: row.name,
+//     gender: row.gender,
+//     gender_probability: parseFloat(row.gender_probability),
+//     age: parseInt(row.age, 10),
+//     age_group: row.age_group,
+//     country_id: row.country_id,
+//     country_name: row.country_name || null,
+//     country_probability: parseFloat(row.country_probability),
+//     created_at: new Date(row.created_at).toISOString(),
+//   };
+// }
+
+// function formatProfileFull(row) {
+//   const p = formatProfile(row);
+//   if (row.sample_size != null) p.sample_size = parseInt(row.sample_size, 10);
+//   return p;
+// }
+
+// // WHERE clause builder 
+// function buildWhereClause(filters) {
+//   const conditions = ['1=1'];
+//   const params = [];
+
+//   const add = (sql, value) => {
+//     params.push(value);
+//     conditions.push(sql.replace('?', `$${params.length}`));
+//   };
+
+//   if (filters.gender) add('LOWER(gender) = ?', filters.gender.toLowerCase());
+//   if (filters.age_group) add('LOWER(age_group) = ?', filters.age_group.toLowerCase());
+//   if (filters.country_id) add('UPPER(country_id) = ?', filters.country_id.toUpperCase());
+
+//   if (filters.min_age != null) add('age >= ?', parseInt(filters.min_age, 10));
+//   if (filters.max_age != null) add('age <= ?', parseInt(filters.max_age, 10));
+//   if (filters.min_gender_probability != null) add('gender_probability >= ?', parseFloat(filters.min_gender_probability));
+//   if (filters.min_country_probability != null) add('country_probability >= ?', parseFloat(filters.min_country_probability));
+
+//   return { where: conditions.join(' AND '), params };
+// }
+
+// // Query-param validation 
+// function validateListParams(q) {
+//   const numericFields = [
+//     'min_age', 'max_age',
+//     'min_gender_probability', 'min_country_probability',
+//     'page', 'limit',
+//   ];
+
+//   for (const f of numericFields) {
+//     if (q[f] !== undefined && isNaN(Number(q[f]))) {
+//       return 'Invalid query parameters';
+//     }
+//   }
+
+//   if (q.sort_by && !VALID_SORT_FIELDS.includes(q.sort_by)) return 'Invalid query parameters';
+//   if (q.order && !VALID_ORDERS.includes(q.order.toLowerCase())) return 'Invalid query parameters';
+
+//   return null;
+// }
+
+// // POST /api/profiles 
+// router.post('/', async (req, res) => {
+//   const { name } = req.body;
+
+//   if (name === undefined || name === null || name === '')
+//     return res.status(400).json({ status: 'error', message: 'Name is required' });
+//   if (typeof name !== 'string')
+//     return res.status(422).json({ status: 'error', message: 'Name must be a string' });
+//   if (name.trim() === '')
+//     return res.status(400).json({ status: 'error', message: 'Name cannot be empty' });
+
+//   const normalizedName = name.trim().toLowerCase();
+
+//   try {
+//     const existing = await pool.query(
+//       'SELECT * FROM profiles WHERE LOWER(name) = $1',
+//       [normalizedName]
+//     );
+//     if (existing.rows.length > 0) {
+//       return res.status(200).json({
+//         status: 'success',
+//         message: 'Profile already exists',
+//         data: formatProfileFull(existing.rows[0]),
+//       });
+//     }
+
+//     const enriched = await enrichName(normalizedName);
+//     const id = uuidv7();
+//     const created_at = new Date().toISOString();
+
+//     const result = await pool.query(
+//       `INSERT INTO profiles
+//          (id, name, gender, gender_probability, sample_size,
+//           age, age_group, country_id, country_name, country_probability, created_at)
+//        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+//        RETURNING *`,
+//       [
+//         id, normalizedName,
+//         enriched.gender, enriched.gender_probability, enriched.sample_size,
+//         enriched.age, enriched.age_group,
+//         enriched.country_id, enriched.country_name, enriched.country_probability,
+//         created_at,
+//       ]
+//     );
+
+//     return res.status(201).json({
+//       status: 'success',
+//       data: formatProfileFull(result.rows[0]),
+//     });
+//   } catch (err) {
+//     if (err.statusCode === 502)
+//       return res.status(502).json({ status: '502', message: `${err.api} returned an invalid response` });
+//     console.error('[POST /api/profiles]', err);
+//     return res.status(500).json({ status: 'error', message: 'Internal server error' });
+//   }
+// });
+
+// // GET /api/profiles/search
+// router.get('/search', async (req, res) => {
+//   const { q } = req.query;
+
+//   if (!q || String(q).trim() === '')
+//     return res.status(400).json({ status: 'error', message: 'Query parameter q is required' });
+
+//   const { filters, interpreted } = parseQuery(q);
+
+//   if (!interpreted)
+//     return res.status(400).json({ status: 'error', message: 'Unable to interpret query' });
+
+//   const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
+//   const { where, params } = buildWhereClause(filters);
+
+//   try {
+//     const countResult = await pool.query(
+//       `SELECT COUNT(*) FROM profiles WHERE ${where}`,
+//       params
+//     );
+//     const total = parseInt(countResult.rows[0].count, 10);
+
+//     const dataParams = [...params, limit, offset];
+//     const dataResult = await pool.query(
+//       `SELECT * FROM profiles
+//        WHERE ${where}
+//        ORDER BY created_at DESC
+//        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+//       dataParams
+//     );
+
+//     return res.status(200).json({
+//       status: 'success',
+//       page,
+//       limit,
+//       total,
+//       data: dataResult.rows.map(formatProfile),
+//     });
+//   } catch (err) {
+//     console.error('[GET /api/profiles/search]', err);
+//     return res.status(500).json({ status: 'error', message: 'Internal server error' });
+//   }
+// });
+
+// // GET /api/profiles 
+// router.get('/', async (req, res) => {
+//   const validationError = validateListParams(req.query);
+//   if (validationError)
+//     return res.status(400).json({ status: 'error', message: validationError });
+
+//   const {
+//     gender, age_group, country_id,
+//     min_age, max_age,
+//     min_gender_probability, min_country_probability,
+//     sort_by = 'created_at',
+//     order = 'desc',
+//   } = req.query;
+
+//   const { page, limit, offset } = parsePagination(req.query.page, req.query.limit);
+
+//   const sortField = VALID_SORT_FIELDS.includes(sort_by) ? sort_by : 'created_at';
+//   const sortOrder = VALID_ORDERS.includes((order || '').toLowerCase()) ? order.toLowerCase() : 'desc';
+
+//   const { where, params } = buildWhereClause({
+//     gender, age_group, country_id,
+//     min_age, max_age,
+//     min_gender_probability, min_country_probability,
+//   });
+
+//   try {
+//     const countResult = await pool.query(
+//       `SELECT COUNT(*) FROM profiles WHERE ${where}`,
+//       params
+//     );
+//     const total = parseInt(countResult.rows[0].count, 10);
+
+//     const dataParams = [...params, limit, offset];
+//     const dataResult = await pool.query(
+//       `SELECT * FROM profiles
+//        WHERE ${where}
+//        ORDER BY ${sortField} ${sortOrder}
+//        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+//       dataParams
+//     );
+
+//     return res.status(200).json({
+//       status: 'success',
+//       page,
+//       limit,
+//       total,
+//       data: dataResult.rows.map(formatProfile),
+//     });
+//   } catch (err) {
+//     console.error('[GET /api/profiles]', err);
+//     return res.status(500).json({ status: 'error', message: 'Internal server error' });
+//   }
+// });
+
+// // GET /api/profiles/:id 
+// router.get('/:id', async (req, res) => {
+//   try {
+//     const result = await pool.query(
+//       'SELECT * FROM profiles WHERE id = $1',
+//       [req.params.id]
+//     );
+//     if (result.rows.length === 0)
+//       return res.status(404).json({ status: 'error', message: 'Profile not found' });
+
+//     return res.status(200).json({
+//       status: 'success',
+//       data: formatProfileFull(result.rows[0]),
+//     });
+//   } catch (err) {
+//     console.error('[GET /api/profiles/:id]', err);
+//     return res.status(500).json({ status: 'error', message: 'Internal server error' });
+//   }
+// });
+
+// // DELETE /api/profiles/:id 
+// router.delete('/:id', async (req, res) => {
+//   try {
+//     const result = await pool.query(
+//       'DELETE FROM profiles WHERE id = $1 RETURNING id',
+//       [req.params.id]
+//     );
+//     if (result.rows.length === 0)
+//       return res.status(404).json({ status: 'error', message: 'Profile not found' });
+
+//     return res.status(204).send();
+//   } catch (err) {
+//     console.error('[DELETE /api/profiles/:id]', err);
+//     return res.status(500).json({ status: 'error', message: 'Internal server error' });
+//   }
+// });
+
+// module.exports = router;

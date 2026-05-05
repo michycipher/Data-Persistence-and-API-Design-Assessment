@@ -40,6 +40,32 @@ async function initDB() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_profiles_age         ON profiles(age)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_profiles_created_at  ON profiles(created_at)`);
 
+   // USERS TABLE
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY,
+      github_id VARCHAR UNIQUE NOT NULL,
+      username VARCHAR,
+      email VARCHAR,
+      avatar_url VARCHAR,
+      role VARCHAR DEFAULT 'analyst',
+      is_active BOOLEAN DEFAULT true,
+      last_login_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL
+    )
+  `);
+
+  // REFRESH TOKENS TABLE
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id UUID PRIMARY KEY,
+      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL
+    )
+  `);
+
   console.log('Database ready.');
 }
 
